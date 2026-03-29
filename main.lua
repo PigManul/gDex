@@ -7,7 +7,7 @@
 
 	Dex is a debugging suite designed to help the user debug games and find any potential vulnerabilities.
 ]]
-
+if getgenv()._gDex then return end; getgenv()._gDex = true
 local nodes = {}
 local selection
 
