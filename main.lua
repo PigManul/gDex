@@ -3,17 +3,95 @@
 --[[
 	Dex
 	Created by Moon
-	Modified for Infinite Yield
+	Modified for Infinite Yield ^^ idk???
 
 	Dex is a debugging suite designed to help the user debug games and find any potential vulnerabilities.
 ]]
-if getgenv()._gDex then return end; getgenv()._gDex = true
+
 local nodes = {}
 local selection
 
 local function missing(t, f, fallback)
 	if type(f) == t then return f end
 	return fallback
+end
+
+local __gDexGenv
+do
+	local ok, genv = pcall(function()
+		return (type(getgenv) == "function") and getgenv() or nil
+	end)
+	__gDexGenv = ok and genv or nil
+
+	if __gDexGenv then
+
+		if type(__gDexGenv.__gDexCleanup) == "function" then
+			pcall(__gDexGenv.__gDexCleanup)
+		end
+
+		pcall(function()
+			local candidates = {}
+			local function addChildren(container)
+				if not container then return end
+				for _, ch in ipairs(container:GetChildren()) do
+					if ch and ch.IsA and ch:IsA("ScreenGui") then
+						table.insert(candidates, ch)
+					end
+				end
+			end
+
+			addChildren(game:GetService("CoreGui"))
+			local pg = game:GetService("Players").LocalPlayer:FindFirstChildOfClass("PlayerGui")
+			addChildren(pg)
+			if type(gethui) == "function" then
+				local ok, hui = pcall(gethui)
+				if ok and hui then addChildren(hui) end
+			end
+
+			local killNames = {
+				Intro = true,
+				MainMenu = true,
+				Context = true,
+				Window = true,
+			}
+			for i = 1, #candidates do
+				local g = candidates[i]
+				if killNames[g.Name] then
+					pcall(function() g:Destroy() end)
+				end
+			end
+		end)
+
+		__gDexGenv.__gDexRegistry = {
+			guis = {},
+			cons = {},
+		}
+
+		__gDexGenv.__gDexCleanup = function()
+			local reg = __gDexGenv.__gDexRegistry
+			if type(reg) == "table" then
+				if type(reg.cons) == "table" then
+					for i = 1, #reg.cons do
+						pcall(function()
+							local c = reg.cons[i]
+							if c and c.Disconnect then c:Disconnect() end
+						end)
+					end
+				end
+				if type(reg.guis) == "table" then
+					for i = 1, #reg.guis do
+						pcall(function()
+							local g = reg.guis[i]
+							if g and g.Destroy then g:Destroy() end
+						end)
+					end
+				end
+			end
+			__gDexGenv.__gDexRegistry = { guis = {}, cons = {} }
+			__gDexGenv.__gDexState = "stopped"
+		end
+		__gDexGenv.__gDexState = "loading"
+	end
 end
 
 local cloneref = missing("function", cloneref, function(...) return ... end)
@@ -508,6 +586,7 @@ local EmbeddedModules = {
 				dragOutline.Parent = treeFrame
 
 				local mouse = Main.Mouse or service.Players.LocalPlayer:GetMouse()
+				local hoveredIndex = nil
 				local function move()
 					local posX = mouse.X - offX
 					local posY = mouse.Y - offY
@@ -516,12 +595,14 @@ local EmbeddedModules = {
 					for i = 1,#listEntries do
 						local entry = listEntries[i]
 						if Lib.CheckMouseInGui(entry) then
+							hoveredIndex = i
 							dragOutline.Position = UDim2.new(0,entry.Indent.Position.X.Offset-scrollH.Index,0,entry.Position.Y.Offset)
 							dragOutline.Size = UDim2.new(0,entry.Size.X.Offset-entry.Indent.Position.X.Offset,0,20)
 							dragOutline.Visible = true
 							return
 						end
 					end
+					hoveredIndex = nil
 					dragOutline.Visible = false
 				end
 				move()
@@ -543,20 +624,16 @@ local EmbeddedModules = {
 						dragOutline:Destroy()
 						Explorer.Dragging = false
 
-						for i = 1,#listEntries do
-							if Lib.CheckMouseInGui(listEntries[i]) then
-								local node = tree[i + Explorer.Index]
-								if node then
-									if selection.Map[node] then return end
-									local newPar = node.Obj
-									local sList = selection.List
-									for i = 1,#sList do
-										local n = sList[i]
-										pcall(function() n.Obj.Parent = newPar end)
-									end
-									Explorer.ViewNode(sList[1])
+						if hoveredIndex then
+							local node = tree[hoveredIndex + Explorer.Index]
+							if node and not selection.Map[node] then
+								local newPar = node.Obj
+								local sList = selection.List
+								for i = 1,#sList do
+									local n = sList[i]
+									pcall(function() n.Obj.Parent = newPar end)
 								end
-								break
+								Explorer.ViewNode(sList[1])
 							end
 						end
 					end
@@ -940,7 +1017,7 @@ local EmbeddedModules = {
 						for i = 1, #sList do
 							local obj = sList[i].Obj
 							local okGui = obj and (obj:IsA("GuiBase2d") or obj:IsA("LayerCollector") or obj:IsA("UIBase"))
-							local okModel = obj and (obj:IsA("Model") or obj:IsA("Folder"))
+							local okModel = obj and (obj:IsA("Model") or obj:IsA("Folder") or obj:IsA("BasePart"))
 							if not (okGui or okModel) then
 								canCopyAsCode = false
 								break
@@ -990,7 +1067,9 @@ local EmbeddedModules = {
 				if getsenvFunc and #sList == 1 then
 					local onlyObj = sList[1] and sList[1].Obj
 					local canViewEnv = onlyObj and (onlyObj:IsA("LocalScript") or onlyObj:IsA("ModuleScript"))
-					context:AddRegistered("VIEW_ENV", not canViewEnv)
+					if canViewEnv then
+						context:AddRegistered("VIEW_ENV", false)
+					end
 				end
 
 				if sMap[nilNode] then
@@ -1005,7 +1084,10 @@ local EmbeddedModules = {
 			Explorer.InitRightClick = function()
 				local context = Lib.ContextMenu.new()
 
-				context:Register("CUT",{Name = "Cut", IconMap = Explorer.MiscIcons, Icon = "Cut", DisabledIcon = "Cut_Disabled", Shortcut = "Ctrl+Z", OnClick = function()
+				-- expose core actions for hotkeys
+				Explorer.Actions = Explorer.Actions or {}
+
+				Explorer.Actions.Cut = function()
 					local destroy,clone = game.Destroy,game.Clone
 					local sList,newClipboard = selection.List,{}
 					local count = 1
@@ -1020,9 +1102,9 @@ local EmbeddedModules = {
 					end
 					clipboard = newClipboard
 					selection:Clear()
-				end})
+				end
 
-				context:Register("COPY",{Name = "Copy", IconMap = Explorer.MiscIcons, Icon = "Copy", DisabledIcon = "Copy_Disabled", Shortcut = "Ctrl+C", OnClick = function()
+				Explorer.Actions.Copy = function()
 					local clone = game.Clone
 					local sList,newClipboard = selection.List,{}
 					local count = 1
@@ -1035,9 +1117,9 @@ local EmbeddedModules = {
 						end
 					end
 					clipboard = newClipboard
-				end})
+				end
 
-				context:Register("PASTE",{Name = "Paste Into", IconMap = Explorer.MiscIcons, Icon = "Paste", DisabledIcon = "Paste_Disabled", Shortcut = "Ctrl+Shift+V", OnClick = function()
+				Explorer.Actions.Paste = function()
 					local sList = selection.List
 					local newSelection = {}
 					local count = 1
@@ -1059,9 +1141,9 @@ local EmbeddedModules = {
 					if #newSelection > 0 then
 						Explorer.ViewNode(newSelection[1])
 					end
-				end})
+				end
 
-				context:Register("DUPLICATE",{Name = "Duplicate", IconMap = Explorer.MiscIcons, Icon = "Copy", DisabledIcon = "Copy_Disabled", Shortcut = "Ctrl+D", OnClick = function()
+				Explorer.Actions.Duplicate = function()
 					local clone = game.Clone
 					local sList = selection.List
 					local newSelection = {}
@@ -1083,22 +1165,46 @@ local EmbeddedModules = {
 					if #newSelection > 0 then
 						Explorer.ViewNode(newSelection[1])
 					end
-				end})
+				end
 
-				context:Register("DELETE",{Name = "Delete", IconMap = Explorer.MiscIcons, Icon = "Delete", DisabledIcon = "Delete_Disabled", Shortcut = "Del", OnClick = function()
+				Explorer.Actions.Delete = function()
 					local destroy = game.Destroy
 					local sList = selection.List
 					for i = 1,#sList do
 						pcall(destroy,sList[i].Obj)
 					end
 					selection:Clear()
-				end})
+				end
 
-				context:Register("RENAME",{Name = "Rename", IconMap = Explorer.MiscIcons, Icon = "Rename", DisabledIcon = "Rename_Disabled", Shortcut = "F2", OnClick = function()
+				Explorer.Actions.Rename = function()
 					local sList = selection.List
 					if sList[1] then
 						Explorer.SetRenamingNode(sList[1])
 					end
+				end
+
+				context:Register("CUT",{Name = "Cut", IconMap = Explorer.MiscIcons, Icon = "Cut", DisabledIcon = "Cut_Disabled", Shortcut = "Ctrl+X", OnClick = function()
+					Explorer.Actions.Cut()
+				end})
+
+				context:Register("COPY",{Name = "Copy", IconMap = Explorer.MiscIcons, Icon = "Copy", DisabledIcon = "Copy_Disabled", Shortcut = "Ctrl+C", OnClick = function()
+					Explorer.Actions.Copy()
+				end})
+
+				context:Register("PASTE",{Name = "Paste Into", IconMap = Explorer.MiscIcons, Icon = "Paste", DisabledIcon = "Paste_Disabled", Shortcut = "Ctrl+V", OnClick = function()
+					Explorer.Actions.Paste()
+				end})
+
+				context:Register("DUPLICATE",{Name = "Duplicate", IconMap = Explorer.MiscIcons, Icon = "Copy", DisabledIcon = "Copy_Disabled", Shortcut = "Ctrl+D", OnClick = function()
+					Explorer.Actions.Duplicate()
+				end})
+
+				context:Register("DELETE",{Name = "Delete", IconMap = Explorer.MiscIcons, Icon = "Delete", DisabledIcon = "Delete_Disabled", Shortcut = "Del", OnClick = function()
+					Explorer.Actions.Delete()
+				end})
+
+				context:Register("RENAME",{Name = "Rename", IconMap = Explorer.MiscIcons, Icon = "Rename", DisabledIcon = "Rename_Disabled", Shortcut = "F2", OnClick = function()
+					Explorer.Actions.Rename()
 				end})
 
 
@@ -1458,7 +1564,7 @@ local EmbeddedModules = {
 				end
 
 				local function isModelRoot(obj)
-					return obj and (obj:IsA("Model") or obj:IsA("Folder"))
+					return obj and (obj:IsA("Model") or obj:IsA("Folder") or obj:IsA("BasePart"))
 				end
 
 				local function collectTree(root)
@@ -1762,7 +1868,9 @@ local EmbeddedModules = {
 						end
 					end
 				end, OnRightClick = function()
-					workspace.CurrentCamera.CameraSubject = plr.Character
+					local char = plr.Character
+					local hum = char and char:FindFirstChildWhichIsA("Humanoid")
+					workspace.CurrentCamera.CameraSubject = hum or char
 				end})
 
 				local function openModelPreview(target)
@@ -2964,6 +3072,61 @@ local EmbeddedModules = {
 				end)
 				window.OnDeactivate:Connect(function() Explorer.Active = false end)
 				window.OnMinimize:Connect(function() Explorer.Active = false end)
+
+				-- Hotkeys (e.g. Del) for Explorer
+				if Explorer.HotkeyCon then
+					Explorer.HotkeyCon:Disconnect()
+					Explorer.HotkeyCon = nil
+				end
+				Explorer.HotkeyCon = service.UserInputService.InputBegan:Connect(function(input, gameProcessed)
+					if gameProcessed then return end
+					if not Explorer.Active then return end
+					if type(service.UserInputService.GetFocusedTextBox) == "function" and service.UserInputService:GetFocusedTextBox() then return end
+					if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+
+					local uis = service.UserInputService
+					local ctrl = uis:IsKeyDown(Enum.KeyCode.LeftControl) or uis:IsKeyDown(Enum.KeyCode.RightControl)
+					local shift = uis:IsKeyDown(Enum.KeyCode.LeftShift) or uis:IsKeyDown(Enum.KeyCode.RightShift)
+
+					local act = Explorer.Actions
+
+					if input.KeyCode == Enum.KeyCode.Delete then
+						if act and act.Delete then act.Delete() end
+						return
+					end
+
+					if input.KeyCode == Enum.KeyCode.F2 then
+						if act and act.Rename then act.Rename() end
+						return
+					end
+
+					if ctrl then
+						if input.KeyCode == Enum.KeyCode.C then
+							if act and act.Copy then act.Copy() end
+							return
+						elseif input.KeyCode == Enum.KeyCode.X then
+							if act and act.Cut then act.Cut() end
+							return
+						elseif input.KeyCode == Enum.KeyCode.V then
+							if act and act.Paste then act.Paste() end
+							return
+						elseif input.KeyCode == Enum.KeyCode.D then
+							if act and act.Duplicate then act.Duplicate() end
+							return
+						elseif input.KeyCode == Enum.KeyCode.A then
+							-- Select all children of current root node in view (best-effort)
+							-- If nothing is selected, keep as-is.
+							return
+						elseif input.KeyCode == Enum.KeyCode.Z then
+							-- No undo stack implemented in this gDex build.
+							return
+						end
+					end
+				end)
+
+				if __gDexGenv and type(__gDexGenv.__gDexRegistry) == "table" then
+					table.insert(__gDexGenv.__gDexRegistry.cons, Explorer.HotkeyCon)
+				end
 
 				-- Settings
 				autoUpdateSearch = Settings.Explorer.AutoUpdateSearch
@@ -5550,12 +5713,27 @@ local EmbeddedModules = {
 			Lib.ProtectedGuis = {}
 
 			Lib.ShowGui = function(gui)
-				if env.gethui then
-					gui.Parent = env.gethui()
-				elseif env.protectgui then
-					env.protectgui(gui)
+				if __gDexGenv and type(__gDexGenv.__gDexRegistry) == "table" then
+					table.insert(__gDexGenv.__gDexRegistry.guis, gui)
+				end
+
+				local parentSet = false
+
+				if type(env.gethui) == "function" then
+					local ok, hui = pcall(env.gethui)
+					if ok and hui then
+						gui.Parent = hui
+						parentSet = true
+					end
+				end
+
+				if not parentSet and type(env.protectgui) == "function" then
+					pcall(env.protectgui, gui)
 					gui.Parent = Main.GuiHolder
-				else
+					parentSet = true
+				end
+
+				if not parentSet then
 					gui.Parent = Main.GuiHolder
 				end
 			end
@@ -6653,8 +6831,18 @@ local EmbeddedModules = {
 										guiDragging = false
 										alignIndicator.Parent = nil
 										if alignInsertSide then
-											local targetSide = (alignInsertSide == "left" and leftSide) or (alignInsertSide == "right" and rightSide)
-											self:AlignTo(targetSide, alignInsertPos)
+											if alignInsertSide == "bottom" then
+												-- snap to bottom, full width
+												self:SetAligned(false)
+												self:StopTweens()
+												self.PosX = 0
+												self.SizeX = sidesGui.AbsoluteSize.X
+												self.GuiElems.Main.Position = UDim2.new(0, 0, 1, -(self.Minimized and 20 or self.SizeY))
+												self.GuiElems.Main.Size = UDim2.new(0, self.SizeX, 0, (self.Minimized and 20 or self.SizeY))
+											else
+												local targetSide = (alignInsertSide == "left" and leftSide) or (alignInsertSide == "right" and rightSide)
+												self:AlignTo(targetSide, alignInsertPos)
+											end
 										end
 									end
 								end)
@@ -6695,6 +6883,13 @@ local EmbeddedModules = {
 														alignInsertSide = "right"
 														return
 													end
+												elseif inputY >= sidesGui.AbsoluteSize.Y - 25 then
+													alignIndicator.Indicator.Position = UDim2.new(0, 0, 1, -25)
+													alignIndicator.Indicator.Size = UDim2.new(1, 0, 0, 25)
+													Lib.ShowGui(alignIndicator)
+													alignInsertPos = nil
+													alignInsertSide = "bottom"
+													return
 												end
 											end
 											alignIndicator.Parent = nil
@@ -7135,7 +7330,7 @@ local EmbeddedModules = {
 					if not silent then
 						side.Hidden = false
 					end
-					-- updateWindows(silent)
+					updateWindows(silent)
 				end
 
 				funcs.Close = function(self)
@@ -12435,12 +12630,7 @@ Main = (function()
 	end
 
 	Main.Error = function(str)
-		if rconsoleprint then
-			rconsoleprint("DEX ERROR: "..tostring(str).."\n")
-			wait(9e9)
-		else
-			error(str)
-		end
+		error(str)
 	end
 
 	Main.LoadModule = function(name)
@@ -12491,7 +12681,11 @@ Main = (function()
 		for i,v in pairs(Main.ModuleList) do
 			local s,e = pcall(Main.LoadModule,v)
 			if not s then
-				Main.Error(("FAILED LOADING %s CAUSE %s"):format(v, e))
+				if v == "SaveInstance" then
+					warn(("gDex: failed to load optional module %s: %s"):format(v, tostring(e)))
+				else
+					Main.Error(("FAILED LOADING %s CAUSE %s"):format(v, e))
+				end
 			end
 		end
 
@@ -12904,12 +13098,27 @@ Main = (function()
 	end
 
 	Main.ShowGui = function(gui)
-		if env.gethui then
-			gui.Parent = env.gethui()
-		elseif env.protectgui then
-			env.protectgui(gui)
+		if __gDexGenv and type(__gDexGenv.__gDexRegistry) == "table" then
+			table.insert(__gDexGenv.__gDexRegistry.guis, gui)
+		end
+
+		local parentSet = false
+
+		if type(env.gethui) == "function" then
+			local ok, hui = pcall(env.gethui)
+			if ok and hui then
+				gui.Parent = hui
+				parentSet = true
+			end
+		end
+
+		if not parentSet and type(env.protectgui) == "function" then
+			pcall(env.protectgui, gui)
 			gui.Parent = Main.GuiHolder
-		else
+			parentSet = true
+		end
+
+		if not parentSet then
 			gui.Parent = Main.GuiHolder
 		end
 	end
@@ -13486,6 +13695,33 @@ Main = (function()
 		Explorer.Window:Show({Align = "right", Pos = 1, Size = 0.5, Silent = true})
 		Properties.Window:Show({Align = "right", Pos = 2, Size = 0.5, Silent = true})
 		Lib.DeferFunc(function() Lib.Window.ToggleSide("right") end)
+
+			if __gDexGenv then
+				__gDexGenv.__gDexState = "running"
+				__gDexGenv.__gDexCleanup = function()
+					local reg = __gDexGenv.__gDexRegistry
+					if type(reg) == "table" then
+						if type(reg.cons) == "table" then
+							for i = 1, #reg.cons do
+								pcall(function()
+									local c = reg.cons[i]
+									if c and c.Disconnect then c:Disconnect() end
+								end)
+							end
+						end
+						if type(reg.guis) == "table" then
+							for i = 1, #reg.guis do
+								pcall(function()
+									local g = reg.guis[i]
+									if g and g.Destroy then g:Destroy() end
+								end)
+							end
+						end
+					end
+					__gDexGenv.__gDexRegistry = { guis = {}, cons = {} }
+					__gDexGenv.__gDexState = "stopped"
+				end
+			end
 	end
 
 	return Main
